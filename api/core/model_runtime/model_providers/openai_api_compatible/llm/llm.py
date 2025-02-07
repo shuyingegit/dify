@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from collections.abc import Generator
 from decimal import Decimal
 from typing import Optional, Union, cast
@@ -332,6 +333,23 @@ class OAIAPICompatLargeLanguageModel(_CommonOaiApiCompat, LargeLanguageModel):
         if not endpoint_url.endswith("/"):
             endpoint_url += "/"
 
+        response_format = model_parameters.get("response_format")
+        if response_format:
+            if response_format == "json_schema":
+                json_schema = model_parameters.get("json_schema")
+                if not json_schema:
+                    raise ValueError("Must define JSON Schema when the response format is json_schema")
+                try:
+                    schema = json.loads(json_schema)
+                except:
+                    raise ValueError(f"not correct json_schema format: {json_schema}")
+                model_parameters.pop("json_schema")
+                model_parameters["response_format"] = {"type": "json_schema", "json_schema": schema}
+            else:
+                model_parameters["response_format"] = {"type": response_format}
+        elif "json_schema" in model_parameters:
+            del model_parameters["json_schema"]
+
         data = {"model": model, "stream": stream, **model_parameters}
 
         completion_type = LLMMode.value_of(credentials["mode"])
@@ -456,13 +474,15 @@ class OAIAPICompatLargeLanguageModel(_CommonOaiApiCompat, LargeLanguageModel):
 
         finish_reason = None  # The default value of finish_reason is None
         message_id, usage = None, None
+        is_reasoning_started = False
+        is_reasoning_started_tag = False
         for chunk in response.iter_lines(decode_unicode=True, delimiter=delimiter):
             chunk = chunk.strip()
             if chunk:
                 # ignore sse comments
                 if chunk.startswith(":"):
                     continue
-                decoded_chunk = chunk.strip().removeprefix("data: ")
+                decoded_chunk = chunk.strip().removeprefix("data:").lstrip()
                 if decoded_chunk == "[DONE]":  # Some provider returns "data: [DONE]"
                     continue
 
@@ -496,6 +516,36 @@ class OAIAPICompatLargeLanguageModel(_CommonOaiApiCompat, LargeLanguageModel):
                 if "delta" in choice:
                     delta = choice["delta"]
                     delta_content = delta.get("content")
+                    if not delta_content:
+                        delta_content = ""
+
+                    if not is_reasoning_started_tag and "<think>" in delta_content:
+                        is_reasoning_started_tag = True
+                        delta_content = "> 💭 " + delta_content.replace("<think>", "")
+                    elif is_reasoning_started_tag and "</think>" in delta_content:
+                        delta_content = delta_content.replace("</think>", "") + "\n\n"
+                        is_reasoning_started_tag = False
+                    elif is_reasoning_started_tag:
+                        if "\n" in delta_content:
+                            delta_content = re.sub(r"\n(?!(>|\n))", "\n> ", delta_content)
+
+                    reasoning_content = delta.get("reasoning_content")
+                    if is_reasoning_started and not reasoning_content and not delta_content:
+                        delta_content = ""
+                    elif reasoning_content:
+                        if not is_reasoning_started:
+                            delta_content = "> 💭 " + reasoning_content
+                            is_reasoning_started = True
+                        else:
+                            delta_content = reasoning_content
+
+                        if "\n" in delta_content:
+                            delta_content = re.sub(r"\n(?!(>|\n))", "\n> ", delta_content)
+                    elif is_reasoning_started:
+                        # If we were in reasoning mode but now getting regular content,
+                        # add \n\n to close the reasoning block
+                        delta_content = "\n\n" + delta_content
+                        is_reasoning_started = False
 
                     assistant_message_tool_calls = None
 

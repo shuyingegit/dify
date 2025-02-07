@@ -1,3 +1,4 @@
+import re
 from collections.abc import Generator, Iterator
 from typing import Optional, cast
 
@@ -17,7 +18,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletio
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaFunctionCall, ChoiceDeltaToolCall
 from openai.types.chat.chat_completion_message import FunctionCall
 from openai.types.completion import Completion
-from xinference_client.client.restful.restful_client import (
+from xinference_client.client.restful.restful_client import (  # type: ignore
     Client,
     RESTfulChatModelHandle,
     RESTfulGenerateModelHandle,
@@ -406,7 +407,7 @@ class XinferenceAILargeLanguageModel(LargeLanguageModel):
             elif credentials["completion_type"] == "completion":
                 completion_type = LLMMode.COMPLETION.value
             else:
-                raise ValueError(f'completion_type {credentials["completion_type"]} is not supported')
+                raise ValueError(f"completion_type {credentials['completion_type']} is not supported")
         else:
             extra_args = XinferenceHelper.get_xinference_extra_parameter(
                 server_url=credentials["server_url"],
@@ -472,7 +473,7 @@ class XinferenceAILargeLanguageModel(LargeLanguageModel):
         api_key = credentials.get("api_key") or "abc"
 
         client = OpenAI(
-            base_url=f'{credentials["server_url"]}/v1',
+            base_url=f"{credentials['server_url']}/v1",
             api_key=api_key,
             max_retries=int(credentials.get("max_retries") or DEFAULT_MAX_RETRIES),
             timeout=int(credentials.get("invoke_timeout") or DEFAULT_INVOKE_TIMEOUT),
@@ -635,16 +636,16 @@ class XinferenceAILargeLanguageModel(LargeLanguageModel):
         handle stream chat generate response
         """
         full_response = ""
-
+        is_reasoning_started_tag = False
         for chunk in resp:
             if len(chunk.choices) == 0:
                 continue
-
             delta = chunk.choices[0]
-
             if delta.finish_reason is None and (delta.delta.content is None or delta.delta.content == ""):
                 continue
-
+            delta_content = delta.delta.content
+            if not delta_content:
+                delta_content = ""
             # check if there is a tool call in the response
             function_call = None
             tool_calls = []
@@ -657,9 +658,18 @@ class XinferenceAILargeLanguageModel(LargeLanguageModel):
             if function_call:
                 assistant_message_tool_calls += [self._extract_response_function_call(function_call)]
 
+            if not is_reasoning_started_tag and "<think>" in delta_content:
+                is_reasoning_started_tag = True
+                delta_content = "> 💭 " + delta_content.replace("<think>", "")
+            elif is_reasoning_started_tag and "</think>" in delta_content:
+                delta_content = delta_content.replace("</think>", "") + "\n\n"
+                is_reasoning_started_tag = False
+            elif is_reasoning_started_tag:
+                if "\n" in delta_content:
+                    delta_content = re.sub(r"\n(?!(>|\n))", "\n> ", delta_content)
             # transform assistant message to prompt message
             assistant_prompt_message = AssistantPromptMessage(
-                content=delta.delta.content or "", tool_calls=assistant_message_tool_calls
+                content=delta_content or "", tool_calls=assistant_message_tool_calls
             )
 
             if delta.finish_reason is not None:
@@ -697,7 +707,7 @@ class XinferenceAILargeLanguageModel(LargeLanguageModel):
                     ),
                 )
 
-                full_response += delta.delta.content
+                full_response += delta_content
 
     def _handle_completion_generate_response(
         self,
